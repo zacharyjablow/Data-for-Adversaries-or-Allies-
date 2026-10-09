@@ -1,0 +1,214 @@
+# ============================================================================
+# Figure 5 — Distribution of Con arguments by type of criticism, by case,
+# EXCLUDING arguments made by foreign officials/media (source code 3) or
+# civilians from the targeted country (source code 8)
+# Media coverage of US military interventions: Libya 1986, Iran 2020,
+# Yugoslavia 1999, Libya 2011
+# ============================================================================
+#
+# Identical to Figure 3, except: any argument occurrence whose originating
+# source (Source 1..8 for news articles) or author (for opinion pieces) is
+# coded 3 ("Foreign official, politician, or foreign media organization")
+# or 8 ("Ordinary civilian from targeted country") is excluded before
+# counting. Percentages are of that case's remaining (post-exclusion) total
+# Con-argument count.
+#
+# Panel layout (2x2), same order as Figures 1-4, no overall title:
+#   Row 1: Iran 2020        | Libya 1986
+#   Row 2: Libya 2011       | Yugoslavia 1999
+#
+# Argument codes are pulled from BOTH the opinion-piece "Argument 1..6"
+# columns AND the news-article "Source 1..8 argument" columns. Semicolon-
+# separated cells are split into separate code occurrences. Each occurrence
+# is tagged with its originating source/author type code (leading-digit
+# extraction handles "(specify)" suffixes like "3 (Iraq)") so the exclusion
+# can be applied.
+
+# ---- Packages ----------------------------------------------------------
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(purrr)
+library(forcats)
+library(ggplot2)
+library(patchwork)
+
+# ---- File path -----------------------------------------------------------
+file_path <- "legacy_media_content_data.xlsx"   # update path if needed
+
+sheet_names <- c("Libya 1986", "Iran 2020", "Yugoslavia 1999", "Libya 2011")
+
+# ---- Con-argument codebooks with criticism type (from Categorized_argument
+# ---- _codes.docx, verified directly against the raw table) ---------------
+
+codebook_iran2020 <- tribble(
+  ~code, ~type,
+  "104","Tactical/strategic", "105","Tactical/strategic", "106","Tactical/strategic",
+  "107","Procedural",
+  "108","Tactical/strategic", "109","Tactical/strategic",
+  "110","Legal",
+  "111","Moral",
+  "112","Legal",
+  "113","Moral",
+  "115","Legal",
+  "116","Tactical/strategic", "117","Tactical/strategic"
+)
+
+codebook_libya1986 <- tribble(
+  ~code, ~type,
+  "205","Tactical/strategic", "206","Tactical/strategic", "207","Tactical/strategic",
+  "208","Tactical/strategic", "209","Tactical/strategic",
+  "210","Procedural",
+  "211","Tactical/strategic", "212","Tactical/strategic",
+  "213","Moral",
+  "214","Tactical/strategic",
+  "215","Moral", "216","Moral",
+  "217","Legal"
+)
+
+codebook_libya2011 <- tribble(
+  ~code, ~type,
+  "310","Procedural",
+  "311","Tactical/strategic", "312","Tactical/strategic", "313","Tactical/strategic",
+  "314","Tactical/strategic", "315","Tactical/strategic",
+  "316","Legal",
+  "317","Moral", "318","Moral",
+  "319","Legal",
+  "320","Moral", "321","Moral", "322","Moral",
+  "323","Tactical/strategic"
+)
+
+codebook_yugoslavia1999 <- tribble(
+  ~code, ~type,
+  "407","Procedural",
+  "408","Tactical/strategic", "409","Tactical/strategic", "410","Tactical/strategic",
+  "411","Tactical/strategic", "412","Tactical/strategic", "413","Tactical/strategic",
+  "414","Tactical/strategic",
+  "415","Legal",
+  "416","Moral", "417","Moral", "418","Moral", "419","Moral", "420","Moral"
+)
+
+codebooks <- list(
+  "Libya 1986"      = codebook_libya1986,
+  "Iran 2020"       = codebook_iran2020,
+  "Yugoslavia 1999" = codebook_yugoslavia1999,
+  "Libya 2011"      = codebook_libya2011
+)
+
+type_levels <- c("Tactical/strategic", "Procedural", "Legal", "Moral")
+
+# ---- Extraction: every argument code from Argument 1..6 and Source 1..8
+# ---- argument columns, each tagged with its originating source/author
+# ---- type code (Author_code for opinion pieces, Source N_code for news) --
+
+EXCLUDED_ORIGIN_CODES <- c("3", "8")
+
+extract_argument_codes_with_origin <- function(df) {
+  df <- df %>% mutate(.row_id = row_number())
+
+  arg_cols <- names(df)[str_detect(names(df), regex("^Argument\\s*\\d+$", ignore_case = TRUE))]
+  author_part <- df %>%
+    select(.row_id, Author_code, all_of(arg_cols)) %>%
+    mutate(across(all_of(arg_cols), as.character)) %>%
+    pivot_longer(cols = all_of(arg_cols), names_to = "column", values_to = "raw_value") %>%
+    mutate(origin_raw = as.character(Author_code)) %>%
+    select(.row_id, column, raw_value, origin_raw)
+
+  source_parts <- map_dfr(1:8, function(num) {
+    code_col <- names(df)[str_detect(names(df), regex(paste0("^Source\\s*", num, "[_ ]*code$"), ignore_case = TRUE))]
+    arg_col  <- names(df)[str_detect(names(df), regex(paste0("^Source\\s*", num, "[_ ]*argument$"), ignore_case = TRUE))]
+    if (length(code_col) == 0 || length(arg_col) == 0) return(tibble())
+    df %>%
+      select(.row_id, .code_val = all_of(code_col[1]), raw_value = all_of(arg_col[1])) %>%
+      mutate(column = arg_col[1],
+             raw_value = as.character(raw_value),
+             origin_raw = as.character(.code_val)) %>%
+      select(.row_id, column, raw_value, origin_raw)
+  })
+
+  bind_rows(author_part, source_parts) %>%
+    filter(!is.na(raw_value), str_trim(raw_value) != "") %>%
+    separate_rows(raw_value, sep = ";") %>%
+    mutate(code = str_trim(raw_value)) %>%
+    filter(code != "") %>%
+    # Leading-digit extraction on the origin code handles "(specify)"
+    # suffixes like "3 (Iraq)" or "8 (Libya)".
+    mutate(origin_code = str_extract(str_trim(origin_raw), "^\\d+")) %>%
+    select(.row_id, column, code, origin_code)
+}
+
+# ---- Read + extract + validate + aggregate per sheet -----------------------
+# Note: validity is checked against the Con-argument codebook only, since
+# this figure is Con arguments exclusively; Pro and OTHER codes are expected
+# to appear in the raw extraction and are simply not part of this codebook,
+# not flagged as errors.
+
+case_freq <- map(sheet_names, function(sheet) {
+  df <- read_excel(file_path, sheet = sheet)
+  codes <- extract_argument_codes_with_origin(df)
+  cb <- codebooks[[sheet]]
+
+  n_excluded <- codes %>% filter(origin_code %in% EXCLUDED_ORIGIN_CODES) %>% nrow()
+  message(sprintf(
+    "[%s] %d argument occurrence(s) excluded (source code 3 or 8, before Con-only filtering).",
+    sheet, n_excluded
+  ))
+
+  agg <- codes %>%
+    filter(!origin_code %in% EXCLUDED_ORIGIN_CODES) %>%
+    inner_join(cb, by = "code") %>%   # keep only Con codes (drops Pro/Other)
+    count(type, name = "n") %>%
+    mutate(type = factor(type, levels = type_levels)) %>%
+    complete(type, fill = list(n = 0))
+
+  total_n <- sum(agg$n)
+  agg %>% mutate(pct = if (total_n > 0) n / total_n * 100 else 0, total_n = total_n)
+})
+names(case_freq) <- sheet_names
+
+# ---- Plotting function (greyscale, no plot titles other than case name) ---
+
+type_colors <- c(
+  "Tactical/strategic" = "#2b2b2b",
+  "Procedural"          = "#6e6e6e",
+  "Legal"               = "#a6a6a6",
+  "Moral"               = "#d4d4d4"
+)
+
+make_panel <- function(freq, case_name, y_max) {
+  ggplot(freq, aes(x = type, y = pct, fill = type)) +
+    geom_col(width = 0.6) +
+    geom_text(aes(label = sprintf("%d (%.1f%%)", n, pct)),
+              vjust = -0.4, size = 2.8, color = "#333333") +
+    scale_fill_manual(values = type_colors, guide = "none") +
+    scale_y_continuous(limits = c(0, y_max), expand = expansion(mult = c(0, 0.05))) +
+    labs(title = case_name, x = NULL, y = "Percent") +
+    theme_minimal(base_size = 10) +
+    theme(
+      axis.text.x = element_text(size = 8.5),
+      plot.title = element_text(face = "bold", size = 13)
+    )
+}
+
+# Shared y-axis across this figure's own four panels only (not tied to
+# Figures 1 or 2).
+local_max_pct <- max(map_dbl(case_freq, ~ max(.x$pct)))
+y_axis_max <- local_max_pct * 1.15
+
+panels <- imap(case_freq, function(d, sheet) make_panel(d, sheet, y_axis_max))
+
+# ---- Combine into 2x2 layout: Iran 2020 | Libya 1986 // Libya 2011 | Yugoslavia 1999
+figure5 <- (panels[["Iran 2020"]] | panels[["Libya 1986"]]) /
+           (panels[["Libya 2011"]] | panels[["Yugoslavia 1999"]])
+
+ggsave("figure5_con_criticism_type_excl_foreign.png", figure5,
+       width = 11, height = 9, dpi = 300)
+
+print(figure5)
+
+# ---- Print frequency tables to console --------------------------------------
+walk(names(case_freq), function(sheet) {
+  cat("\n===", sheet, "( Con n =", case_freq[[sheet]]$total_n[1], ") ===\n")
+  print(case_freq[[sheet]] %>% select(type, n, pct))
+})
